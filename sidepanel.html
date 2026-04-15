@@ -699,6 +699,66 @@
       border-radius: 10px;
       box-shadow: var(--shadow);
     }
+
+    /* Used dropdown */
+    .used-dropdown { margin-top: 10px; }
+
+    .used-list {
+      margin-top: 8px;
+      background: var(--card);
+      border: var(--border);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      max-height: 280px;
+      overflow-y: auto;
+      padding: 6px;
+    }
+
+    .used-list::-webkit-scrollbar { width: 6px; }
+    .used-list::-webkit-scrollbar-thumb { background: var(--ink); border-radius: 4px; }
+
+    .used-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px;
+      border-bottom: 1.5px solid var(--ink);
+    }
+
+    .used-item:last-child { border-bottom: none; }
+
+    .used-item-info { flex: 1; min-width: 0; }
+
+    .used-item-ref {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--ink);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-bottom: 3px;
+    }
+
+    .used-item-text {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .used-empty {
+      text-align: center;
+      padding: 20px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .used-remove {
+      flex-shrink: 0;
+    }
   </style>
 </head>
 <body>

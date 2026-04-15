@@ -435,7 +435,7 @@ function editResponseModal(response) {
 
 // ---- Prayer Lock ----
 const BIBLE_API_URL = 'https://bible-api.com/?random=verse';
-const PRAYER_LOGO = 'assets/prayerlock-logo.svg';
+const PRAYER_LOGO = 'assets/prayerlock-logo.jpg';
 const BACKGROUNDS = [
   'assets/backgrounds/bg1-sunset.svg',
   'assets/backgrounds/bg2-ocean.svg',
@@ -485,6 +485,38 @@ async function markUsed(key, id) {
   const used = await getUsedSet(key);
   used.add(id);
   await storageSet({ [key]: Array.from(used) });
+}
+
+// Used verses store full objects: [{reference, text, translation, bgImage, usedAt}]
+async function getUsedVerseList() {
+  const r = await storageGet(['usedVerses']);
+  const list = r.usedVerses || [];
+  return list.map(v => typeof v === 'string' ? { reference: v, text: '' } : v);
+}
+
+async function getUsedVerseRefs() {
+  const list = await getUsedVerseList();
+  return new Set(list.map(v => v.reference));
+}
+
+async function markVerseUsed(verse) {
+  const list = await getUsedVerseList();
+  if (!list.some(v => v.reference === verse.reference)) {
+    list.push({
+      reference: verse.reference,
+      text: verse.text,
+      translation: verse.translation || '',
+      bgImage: verse.bgImage || '',
+      usedAt: new Date().toISOString(),
+    });
+  }
+  await storageSet({ usedVerses: list });
+}
+
+async function removeUsedVerse(reference) {
+  const list = await getUsedVerseList();
+  const filtered = list.filter(v => v.reference !== reference);
+  await storageSet({ usedVerses: filtered });
 }
 
 // ---- Main dispatcher ----
@@ -689,7 +721,7 @@ async function renderVersesPanel() {
 async function generateVerse() {
   const wrap = document.getElementById('verseCardWrap');
   if (wrap) wrap.innerHTML = '<div class="review-loading">Loading verse...</div>';
-  const used = await getUsedSet('usedVerses');
+  const usedRefs = await getUsedVerseRefs();
 
   let verse = null;
   for (let attempt = 0; attempt < 12; attempt++) {
@@ -700,7 +732,7 @@ async function generateVerse() {
       const reference = json.reference || '';
       const text = (json.text || '').trim();
       if (!text || !reference) continue;
-      if (used.has(reference)) continue;
+      if (usedRefs.has(reference)) continue;
       verse = { reference, text, translation: json.translation_name || '' };
       break;
     } catch (err) {
@@ -710,7 +742,6 @@ async function generateVerse() {
   }
 
   if (!verse) {
-    // All attempts hit used verses — allow a repeat
     try {
       const res = await fetch(BIBLE_API_URL);
       const json = await res.json();
@@ -735,7 +766,7 @@ async function renderVerseCard(v) {
   const stats = document.getElementById('verseStats');
   if (!wrap) return;
   wrap.innerHTML = `
-    <div class="app-card verse-app-card" style="background-image: url('${v.bgImage}');">
+    <div class="app-card verse-app-card" id="verseCardEl" style="background-image: url('${v.bgImage}');">
       <div class="verse-top">
         <img src="${PRAYER_LOGO}" class="app-logo" alt="Prayer Lock">
         <div class="verse-top-name">Prayer Lock</div>
@@ -745,28 +776,255 @@ async function renderVerseCard(v) {
         <div class="verse-reference">— ${esc(v.reference)}${v.translation ? ' · ' + esc(v.translation) : ''}</div>
       </div>
     </div>
-    <div style="display:flex;gap:8px;">
-      <button class="btn btn-primary" id="verseCopy" style="flex:1">Copy & Mark Used</button>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+      <button class="btn btn-primary" id="verseCopyText" style="flex:1;min-width:90px">Copy Text</button>
+      <button class="btn btn-primary" id="verseCopyImg" style="flex:1;min-width:90px">Copy Image</button>
+      <button class="btn" id="verseDownload" style="flex:1;min-width:90px">Download</button>
     </div>
   `;
 
-  const used = await getUsedSet('usedVerses');
+  const usedList = await getUsedVerseList();
   if (stats) {
     stats.innerHTML = `
       <div class="prayer-stat" style="margin-top:10px;">
         <span>${v.text.trim().split(/\s+/).length} words</span>
-        <span>${used.size} verses used</span>
+        <span>${usedList.length} verses used</span>
+      </div>
+      <div class="used-dropdown">
+        <button class="btn" id="toggleUsedVerses" style="width:100%;display:flex;justify-content:space-between;align-items:center;">
+          <span>Used Verses (${usedList.length})</span>
+          <span id="usedVersesArrow">▼</span>
+        </button>
+        <div id="usedVersesList" class="used-list" style="display:none;"></div>
       </div>
     `;
+
+    const listEl = document.getElementById('usedVersesList');
+    const arrowEl = document.getElementById('usedVersesArrow');
+    let expanded = false;
+    document.getElementById('toggleUsedVerses').onclick = () => {
+      expanded = !expanded;
+      listEl.style.display = expanded ? 'block' : 'none';
+      arrowEl.textContent = expanded ? '▲' : '▼';
+      if (expanded) renderUsedVersesList();
+    };
   }
 
-  document.getElementById('verseCopy').onclick = async () => {
-    const text = `"${v.text}"\n— ${v.reference}`;
-    try { await navigator.clipboard.writeText(text); } catch {}
-    await markUsed('usedVerses', v.reference);
+  const onUse = async () => {
+    await markVerseUsed(v);
     await storageSet({ currentVerse: null });
     generateVerse();
   };
+
+  document.getElementById('verseCopyText').onclick = async () => {
+    const text = `"${v.text}"\n— ${v.reference}`;
+    try { await navigator.clipboard.writeText(text); } catch {}
+    flashBtn('verseCopyText', 'Copied!');
+    onUse();
+  };
+
+  document.getElementById('verseCopyImg').onclick = async () => {
+    const btn = document.getElementById('verseCopyImg');
+    btn.textContent = 'Rendering...';
+    try {
+      const blob = await renderVerseBlob(v);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      btn.textContent = 'Copied!';
+      setTimeout(() => onUse(), 400);
+    } catch (err) {
+      btn.textContent = 'Failed';
+      console.error(err);
+      setTimeout(() => btn.textContent = 'Copy Image', 1500);
+    }
+  };
+
+  document.getElementById('verseDownload').onclick = async () => {
+    const btn = document.getElementById('verseDownload');
+    btn.textContent = 'Rendering...';
+    try {
+      const blob = await renderVerseBlob(v);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `verse-${v.reference.replace(/[^\w]/g, '-')}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      btn.textContent = 'Downloaded!';
+      setTimeout(() => onUse(), 400);
+    } catch (err) {
+      btn.textContent = 'Failed';
+      console.error(err);
+      setTimeout(() => btn.textContent = 'Download', 1500);
+    }
+  };
+}
+
+function flashBtn(id, msg) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  const prev = btn.textContent;
+  btn.textContent = msg;
+  setTimeout(() => btn.textContent = prev, 1000);
+}
+
+async function renderUsedVersesList() {
+  const listEl = document.getElementById('usedVersesList');
+  if (!listEl) return;
+  const list = await getUsedVerseList();
+  if (!list.length) {
+    listEl.innerHTML = '<div class="used-empty">No verses used yet.</div>';
+    return;
+  }
+  // Most recent first
+  const sorted = [...list].reverse();
+  listEl.innerHTML = sorted.map(v => `
+    <div class="used-item">
+      <div class="used-item-info">
+        <div class="used-item-ref">${esc(v.reference)}</div>
+        <div class="used-item-text">${esc(v.text)}</div>
+      </div>
+      <button class="mini-btn used-remove" data-ref="${esc(v.reference)}" title="Remove from used">&times;</button>
+    </div>
+  `).join('');
+
+  listEl.querySelectorAll('.used-remove').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      await removeUsedVerse(btn.dataset.ref);
+      renderUsedVersesList();
+      // Also refresh the stats counter
+      const stats = document.getElementById('verseStats');
+      if (stats) {
+        const current = (await storageGet(['currentVerse'])).currentVerse;
+        if (current) renderVerseCard(current);
+      }
+    };
+  });
+}
+
+// ---- Canvas image export ----
+function loadImg(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function wrapText(ctx, text, maxWidth) {
+  const paragraphs = text.split('\n');
+  const lines = [];
+  paragraphs.forEach(para => {
+    const words = para.split(' ');
+    let current = '';
+    for (const word of words) {
+      const test = current ? current + ' ' + word : word;
+      if (ctx.measureText(test).width > maxWidth && current) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+  });
+  return lines;
+}
+
+async function renderVerseBlob(v) {
+  const W = 1200, H = 800;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  // Background
+  try {
+    const bg = await loadImg(v.bgImage);
+    ctx.drawImage(bg, 0, 0, W, H);
+  } catch {
+    ctx.fillStyle = '#2E3192';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Dark gradient overlay (stronger at bottom)
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(10,10,10,0.25)');
+  grad.addColorStop(0.45, 'rgba(10,10,10,0.55)');
+  grad.addColorStop(1, 'rgba(10,10,10,0.92)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Logo top-left
+  try {
+    const logo = await loadImg(PRAYER_LOGO);
+    const logoSize = 110;
+    // rounded rect clip
+    const lx = 50, ly = 50;
+    const r = 22;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(lx + r, ly);
+    ctx.arcTo(lx + logoSize, ly, lx + logoSize, ly + logoSize, r);
+    ctx.arcTo(lx + logoSize, ly + logoSize, lx, ly + logoSize, r);
+    ctx.arcTo(lx, ly + logoSize, lx, ly, r);
+    ctx.arcTo(lx, ly, lx + logoSize, ly, r);
+    ctx.closePath();
+    ctx.clip();
+    ctx.drawImage(logo, lx, ly, logoSize, logoSize);
+    ctx.restore();
+    // Border around logo
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(lx + r, ly);
+    ctx.arcTo(lx + logoSize, ly, lx + logoSize, ly + logoSize, r);
+    ctx.arcTo(lx + logoSize, ly + logoSize, lx, ly + logoSize, r);
+    ctx.arcTo(lx, ly + logoSize, lx, ly, r);
+    ctx.arcTo(lx, ly, lx + logoSize, ly, r);
+    ctx.closePath();
+    ctx.stroke();
+  } catch {}
+
+  // App name
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 34px -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = 8;
+  ctx.fillText('PRAYER LOCK', 180, 105);
+  ctx.shadowBlur = 0;
+
+  // Verse text (wrap)
+  ctx.font = 'italic 600 42px Georgia, "Times New Roman", serif';
+  ctx.fillStyle = '#fff';
+  const maxWidth = W - 100;
+  const quoted = `"${v.text}"`;
+  const lines = wrapText(ctx, quoted, maxWidth);
+  const lineHeight = 58;
+  const refHeight = 50;
+  const bottomPad = 70;
+  const textBlockH = lines.length * lineHeight + refHeight + 30;
+  let y = H - bottomPad - textBlockH + lineHeight / 2;
+  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+  ctx.shadowBlur = 10;
+  lines.forEach(line => {
+    ctx.fillText(line, 50, y);
+    y += lineHeight;
+  });
+
+  // Reference
+  y += 18;
+  ctx.font = '800 26px -apple-system, sans-serif';
+  const refText = `— ${v.reference}${v.translation ? ' · ' + v.translation : ''}`;
+  ctx.fillText(refText.toUpperCase(), 50, y);
+  ctx.shadowBlur = 0;
+
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('toBlob returned null')), 'image/png');
+  });
 }
 
 // ---- Add button ----
