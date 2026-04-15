@@ -3,10 +3,17 @@
   "name": "Quick Responses",
   "version": "1.1.0",
   "description": "Side panel quick responses for fast copy & paste",
-  "permissions": ["sidePanel"],
+  "permissions": ["sidePanel", "storage", "clipboardWrite"],
   "host_permissions": [
     "https://itunes.apple.com/*",
+    "https://bible-api.com/*",
     "https://api-production-cad4.up.railway.app/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
+    }
   ],
   "action": {
     "default_icon": {

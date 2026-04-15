@@ -4,7 +4,6 @@ let data = { folders: [] };
 let navStack = [{ type: 'root' }];
 let searchQuery = '';
 let activeTab = 'responses';
-let prayerState = { appId: null, reviews: [], loaded: false, currentIdx: null };
 
 function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -435,123 +434,339 @@ function editResponseModal(response) {
 }
 
 // ---- Prayer Lock ----
-const PRAYER_LOCK_SEARCH = 'prayerlock';
+const BIBLE_API_URL = 'https://bible-api.com/?random=verse';
+const PRAYER_LOGO = 'assets/prayerlock-logo.svg';
+const BACKGROUNDS = [
+  'assets/backgrounds/bg1-sunset.svg',
+  'assets/backgrounds/bg2-ocean.svg',
+  'assets/backgrounds/bg3-dawn.svg',
+  'assets/backgrounds/bg4-midnight.svg',
+  'assets/backgrounds/bg5-forest.svg',
+  'assets/backgrounds/bg6-lavender.svg',
+  'assets/backgrounds/bg7-gold.svg',
+  'assets/backgrounds/bg8-rose.svg',
+];
 
+let prayerView = 'home'; // 'home' | 'reviews' | 'verses'
+let reviewsCache = { reviews: [], loaded: false };
+
+// ---- Storage helpers (chrome.storage.local with localStorage fallback) ----
+function storageGet(keys) {
+  return new Promise(resolve => {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.get(keys, resolve);
+    } else {
+      const out = {};
+      (Array.isArray(keys) ? keys : [keys]).forEach(k => {
+        try { out[k] = JSON.parse(localStorage.getItem(k) || 'null'); } catch { out[k] = null; }
+      });
+      resolve(out);
+    }
+  });
+}
+
+function storageSet(obj) {
+  return new Promise(resolve => {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.set(obj, resolve);
+    } else {
+      Object.entries(obj).forEach(([k, v]) => localStorage.setItem(k, JSON.stringify(v)));
+      resolve();
+    }
+  });
+}
+
+async function getUsedSet(key) {
+  const r = await storageGet([key]);
+  return new Set(r[key] || []);
+}
+
+async function markUsed(key, id) {
+  const used = await getUsedSet(key);
+  used.add(id);
+  await storageSet({ [key]: Array.from(used) });
+}
+
+// ---- Main dispatcher ----
 async function loadPrayerLock() {
+  if (prayerView === 'home') return renderPrayerHome();
+  if (prayerView === 'reviews') return renderReviewsPanel();
+  if (prayerView === 'verses') return renderVersesPanel();
+}
+
+function renderPrayerHome() {
   const el = document.getElementById('prayerContent');
-  if (prayerState.loaded && prayerState.reviews.length > 0) {
-    renderPrayerLock();
-    return;
-  }
-  el.innerHTML = '<div class="review-loading">Loading Prayer Lock reviews...</div>';
-  try {
-    if (!prayerState.appId) {
-      const searchRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(PRAYER_LOCK_SEARCH)}&entity=software&limit=5`);
-      const searchJson = await searchRes.json();
-      const app = (searchJson.results || []).find(r => /prayer\s*lock/i.test(r.trackName));
-      if (!app) throw new Error('Prayer Lock app not found in App Store');
-      prayerState.appId = app.trackId;
-    }
+  el.innerHTML = `
+    <div class="card-item folder" id="navVerses">
+      <div class="item-icon">&#128218;</div>
+      <div class="item-info">
+        <div class="item-name">Bible Verses</div>
+        <div class="item-meta">Daily scripture cards</div>
+      </div>
+    </div>
+    <div class="card-item folder" id="navReviews">
+      <div class="item-icon">&#11088;</div>
+      <div class="item-info">
+        <div class="item-name">Reviews</div>
+        <div class="item-meta">5★ Prayer Lock reviews</div>
+      </div>
+    </div>
+    <div style="margin-top:14px;">
+      <button class="btn" id="resetUsedBtn" style="width:100%">Reset Used Items</button>
+    </div>
+  `;
+  document.getElementById('navVerses').addEventListener('click', () => { prayerView = 'verses'; loadPrayerLock(); });
+  document.getElementById('navReviews').addEventListener('click', () => { prayerView = 'reviews'; loadPrayerLock(); });
+  document.getElementById('resetUsedBtn').addEventListener('click', async () => {
+    if (!confirm('Reset used reviews AND verses?')) return;
+    await storageSet({ usedReviews: [], usedVerses: [], currentReview: null, currentVerse: null });
+    alert('Reset complete.');
+  });
+}
 
-    const reviews = [];
-    for (let page = 1; page <= 10; page++) {
-      try {
-        const res = await fetch(`https://itunes.apple.com/us/rss/customerreviews/page=${page}/id=${prayerState.appId}/sortBy=mostHelpful/json`);
-        const json = await res.json();
-        const entries = json?.feed?.entry || [];
-        const reviewEntries = Array.isArray(entries) ? entries.filter(e => e['im:rating']) : [];
-        if (reviewEntries.length === 0) break;
-        reviewEntries.forEach(e => {
-          reviews.push({
-            rating: parseInt(e['im:rating'].label),
-            title: e.title?.label || '',
-            content: e.content?.label || '',
-            author: e.author?.name?.label || 'Anonymous',
-            date: e.updated?.label || '',
-          });
-        });
-      } catch (err) { break; }
-    }
+// ---- Reviews panel ----
+async function renderReviewsPanel() {
+  const el = document.getElementById('prayerContent');
+  el.innerHTML = `
+    <div class="prayer-toolbar">
+      <button class="btn" id="prayerBack">← Back</button>
+      <button class="btn btn-primary" id="reviewGenerate" style="flex:1">Generate</button>
+    </div>
+    <div id="reviewCardWrap"></div>
+    <div id="reviewStats"></div>
+  `;
+  document.getElementById('prayerBack').onclick = () => { prayerView = 'home'; loadPrayerLock(); };
+  document.getElementById('reviewGenerate').onclick = generateReview;
 
-    prayerState.reviews = reviews
-      .filter(r => r.rating === 5)
-      .sort((a, b) => b.content.length - a.content.length);
-    prayerState.loaded = true;
-
-    if (!prayerState.reviews.length) {
-      el.innerHTML = '<div class="review-loading">No 5-star reviews found yet.</div>';
+  if (!reviewsCache.loaded) {
+    document.getElementById('reviewCardWrap').innerHTML = '<div class="review-loading">Loading Prayer Lock reviews from iTunes...</div>';
+    try {
+      reviewsCache.reviews = await fetchPrayerLockReviews();
+      reviewsCache.loaded = true;
+    } catch (err) {
+      document.getElementById('reviewCardWrap').innerHTML =
+        `<div class="review-loading">Failed: ${esc(err.message)}<br><br>If you just updated the extension, reload it at chrome://extensions/ first.</div>`;
       return;
     }
-    renderPrayerLock();
-  } catch (err) {
-    el.innerHTML = `<div class="review-loading">Failed to load reviews.<br><br>${esc(err.message)}<br><br><button class="review-btn" id="retryReviews">Retry</button></div>`;
-    document.getElementById('retryReviews')?.addEventListener('click', () => {
-      prayerState.loaded = false;
-      loadPrayerLock();
-    });
+  }
+
+  if (!reviewsCache.reviews.length) {
+    document.getElementById('reviewCardWrap').innerHTML = '<div class="review-loading">No 5★ reviews found.</div>';
+    return;
+  }
+
+  const stored = await storageGet(['currentReview']);
+  if (stored.currentReview) {
+    renderReviewCard(stored.currentReview);
+  } else {
+    generateReview();
   }
 }
 
-function getDailyReviewIndex() {
-  const reviews = prayerState.reviews;
-  if (!reviews.length) return 0;
-  const now = new Date();
-  const start = new Date(now.getFullYear(), 0, 0);
-  const dayOfYear = Math.floor((now - start) / (1000 * 60 * 60 * 24));
-  const poolSize = Math.min(20, reviews.length);
-  return dayOfYear % poolSize;
+async function fetchPrayerLockReviews() {
+  const searchRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent('prayer lock')}&entity=software&limit=15`);
+  const searchJson = await searchRes.json();
+  const app = (searchJson.results || []).find(r => /prayer\s*lock/i.test(r.trackName || ''));
+  if (!app) throw new Error('Prayer Lock not found in App Store');
+
+  const reviews = [];
+  for (let page = 1; page <= 10; page++) {
+    try {
+      const res = await fetch(`https://itunes.apple.com/us/rss/customerreviews/page=${page}/id=${app.trackId}/sortBy=mostHelpful/json`);
+      const json = await res.json();
+      const entries = json?.feed?.entry || [];
+      const reviewEntries = Array.isArray(entries) ? entries.filter(e => e['im:rating']) : [];
+      if (!reviewEntries.length) break;
+      reviewEntries.forEach(e => {
+        const id = e.id?.label || `${e.author?.name?.label}-${e.title?.label}`;
+        reviews.push({
+          id,
+          rating: parseInt(e['im:rating'].label),
+          title: e.title?.label || '',
+          content: e.content?.label || '',
+          author: e.author?.name?.label || 'Anonymous',
+          date: e.updated?.label || '',
+        });
+      });
+    } catch (err) { break; }
+  }
+  return reviews
+    .filter(r => r.rating === 5)
+    .sort((a, b) => b.content.length - a.content.length);
 }
 
-function renderPrayerLock(customIdx) {
-  const el = document.getElementById('prayerContent');
-  const reviews = prayerState.reviews;
-  if (!reviews.length) return;
-  const pool = Math.min(20, reviews.length);
-  const idx = customIdx ?? (prayerState.currentIdx ?? getDailyReviewIndex());
-  prayerState.currentIdx = idx;
-  const r = reviews[idx];
-  const stars = '★'.repeat(r.rating) + '☆'.repeat(5 - r.rating);
+async function generateReview() {
+  const used = await getUsedSet('usedReviews');
+  let pool = reviewsCache.reviews.filter(r => !used.has(r.id));
+  if (!pool.length) {
+    if (confirm('All reviews used. Reset and start over?')) {
+      await storageSet({ usedReviews: [] });
+      pool = reviewsCache.reviews;
+    } else return;
+  }
+  // Weight toward top-20 most verbose (pool already sorted)
+  const topN = Math.min(20, pool.length);
+  const pick = pool[Math.floor(Math.random() * topN)];
+  await storageSet({ currentReview: pick });
+  renderReviewCard(pick);
+}
+
+async function renderReviewCard(r) {
+  const wrap = document.getElementById('reviewCardWrap');
+  const stats = document.getElementById('reviewStats');
+  if (!wrap) return;
+  const stars = '★'.repeat(r.rating);
+  const initial = (r.author || '?').trim()[0]?.toUpperCase() || '?';
   const dateStr = r.date
     ? new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     : '';
-
-  el.innerHTML = `
-    <div class="review-stat">
-      <span>Review of the Day</span>
-      <span>${idx + 1} / ${pool}</span>
-    </div>
-    <div class="review-card">
-      <div class="review-header">
-        <span class="review-stars">${stars}</span>
-        <span class="review-date">${esc(dateStr)}</span>
+  wrap.innerHTML = `
+    <div class="app-card review-app-card">
+      <div class="app-card-header">
+        <img src="${PRAYER_LOGO}" class="app-logo" alt="Prayer Lock">
+        <div class="app-header-text">
+          <div class="app-name">Prayer Lock</div>
+          <div class="app-tagline">App Store Review</div>
+        </div>
       </div>
-      <div class="review-title">${esc(r.title)}</div>
-      <div class="review-content">${esc(r.content)}</div>
-      <div class="review-author">— ${esc(r.author)}</div>
-      <div class="review-actions">
-        <button class="review-btn" id="prevReview">← Prev</button>
-        <button class="review-btn primary" id="copyReview">Copy</button>
-        <button class="review-btn" id="nextReview">Next →</button>
+      <div class="review-stars-big">${stars}</div>
+      <div class="review-title-big">${esc(r.title)}</div>
+      <div class="review-content-big">${esc(r.content)}</div>
+      <div class="review-author-row">
+        <div class="author-avatar">${esc(initial)}</div>
+        <div>
+          <div class="author-name">${esc(r.author)}</div>
+          <div class="author-sub">${esc(dateStr)}</div>
+        </div>
       </div>
-    </div>
-    <div class="review-stat">
-      <span>${r.content.length} chars · ${r.content.trim().split(/\s+/).length} words</span>
-      <span>${reviews.length} total 5★</span>
+      <div style="display:flex;gap:8px;margin-top:14px;">
+        <button class="btn btn-primary" id="reviewCopy" style="flex:1">Copy & Mark Used</button>
+      </div>
     </div>
   `;
 
-  document.getElementById('prevReview').addEventListener('click', () => {
-    renderPrayerLock((idx - 1 + pool) % pool);
-  });
-  document.getElementById('nextReview').addEventListener('click', () => {
-    renderPrayerLock((idx + 1) % pool);
-  });
-  document.getElementById('copyReview').addEventListener('click', (e) => {
+  const used = await getUsedSet('usedReviews');
+  if (stats) {
+    stats.innerHTML = `
+      <div class="prayer-stat">
+        <span>${r.content.length} chars · ${r.content.trim().split(/\s+/).length} words</span>
+        <span>${used.size} / ${reviewsCache.reviews.length} used</span>
+      </div>
+    `;
+  }
+
+  document.getElementById('reviewCopy').onclick = async () => {
     const text = `"${r.title}"\n\n${r.content}\n\n— ${r.author} (${r.rating}★)`;
-    navigator.clipboard.writeText(text);
-    e.target.textContent = 'Copied!';
-    setTimeout(() => e.target.textContent = 'Copy', 1200);
-  });
+    try { await navigator.clipboard.writeText(text); } catch {}
+    await markUsed('usedReviews', r.id);
+    await storageSet({ currentReview: null });
+    generateReview();
+  };
+}
+
+// ---- Verses panel ----
+async function renderVersesPanel() {
+  const el = document.getElementById('prayerContent');
+  el.innerHTML = `
+    <div class="prayer-toolbar">
+      <button class="btn" id="prayerBack">← Back</button>
+      <button class="btn btn-primary" id="verseGenerate" style="flex:1">Generate</button>
+    </div>
+    <div id="verseCardWrap"></div>
+    <div id="verseStats"></div>
+  `;
+  document.getElementById('prayerBack').onclick = () => { prayerView = 'home'; loadPrayerLock(); };
+  document.getElementById('verseGenerate').onclick = generateVerse;
+
+  const stored = await storageGet(['currentVerse']);
+  if (stored.currentVerse) {
+    renderVerseCard(stored.currentVerse);
+  } else {
+    generateVerse();
+  }
+}
+
+async function generateVerse() {
+  const wrap = document.getElementById('verseCardWrap');
+  if (wrap) wrap.innerHTML = '<div class="review-loading">Loading verse...</div>';
+  const used = await getUsedSet('usedVerses');
+
+  let verse = null;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      const res = await fetch(BIBLE_API_URL);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const reference = json.reference || '';
+      const text = (json.text || '').trim();
+      if (!text || !reference) continue;
+      if (used.has(reference)) continue;
+      verse = { reference, text, translation: json.translation_name || '' };
+      break;
+    } catch (err) {
+      if (wrap) wrap.innerHTML = `<div class="review-loading">Failed to fetch verse: ${esc(err.message)}<br><br>If you just updated the extension, reload it at chrome://extensions/ first.</div>`;
+      return;
+    }
+  }
+
+  if (!verse) {
+    // All attempts hit used verses — allow a repeat
+    try {
+      const res = await fetch(BIBLE_API_URL);
+      const json = await res.json();
+      verse = {
+        reference: json.reference || '',
+        text: (json.text || '').trim(),
+        translation: json.translation_name || '',
+      };
+    } catch (err) {
+      if (wrap) wrap.innerHTML = `<div class="review-loading">Failed: ${esc(err.message)}</div>`;
+      return;
+    }
+  }
+
+  verse.bgImage = BACKGROUNDS[Math.floor(Math.random() * BACKGROUNDS.length)];
+  await storageSet({ currentVerse: verse });
+  renderVerseCard(verse);
+}
+
+async function renderVerseCard(v) {
+  const wrap = document.getElementById('verseCardWrap');
+  const stats = document.getElementById('verseStats');
+  if (!wrap) return;
+  wrap.innerHTML = `
+    <div class="app-card verse-app-card" style="background-image: url('${v.bgImage}');">
+      <div class="verse-top">
+        <img src="${PRAYER_LOGO}" class="app-logo" alt="Prayer Lock">
+        <div class="verse-top-name">Prayer Lock</div>
+      </div>
+      <div class="verse-overlay">
+        <div class="verse-text">"${esc(v.text)}"</div>
+        <div class="verse-reference">— ${esc(v.reference)}${v.translation ? ' · ' + esc(v.translation) : ''}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-primary" id="verseCopy" style="flex:1">Copy & Mark Used</button>
+    </div>
+  `;
+
+  const used = await getUsedSet('usedVerses');
+  if (stats) {
+    stats.innerHTML = `
+      <div class="prayer-stat" style="margin-top:10px;">
+        <span>${v.text.trim().split(/\s+/).length} words</span>
+        <span>${used.size} verses used</span>
+      </div>
+    `;
+  }
+
+  document.getElementById('verseCopy').onclick = async () => {
+    const text = `"${v.text}"\n— ${v.reference}`;
+    try { await navigator.clipboard.writeText(text); } catch {}
+    await markUsed('usedVerses', v.reference);
+    await storageSet({ currentVerse: null });
+    generateVerse();
+  };
 }
 
 // ---- Add button ----
