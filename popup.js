@@ -730,8 +730,10 @@ async function renderReviewCard(r) {
           <div class="author-sub">${esc(dateStr)}</div>
         </div>
       </div>
-      <div style="display:flex;gap:8px;margin-top:14px;">
-        <button class="btn btn-primary" id="reviewCopy" style="flex:1">Copy & Mark Used</button>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:14px;">
+        <button class="btn btn-primary" id="reviewCopyText" style="flex:1;min-width:80px">Copy Text</button>
+        <button class="btn btn-primary" id="reviewCopyImg" style="flex:1;min-width:80px">Copy Image</button>
+        <button class="btn" id="reviewDownload" style="flex:1;min-width:80px">Download</button>
       </div>
     </div>
   `;
@@ -746,13 +748,53 @@ async function renderReviewCard(r) {
     `;
   }
 
-  document.getElementById('reviewCopy').onclick = async () => {
-    const caption = pickRandom(REVIEW_CAPTIONS);
-    const text = `${caption}\n\n"${r.title}"\n\n${r.content}\n\n— ${r.author} (${r.rating}★)`;
-    try { await navigator.clipboard.writeText(text); } catch {}
+  const onReviewUse = async () => {
     await markUsed('usedReviews', r.id);
     await storageSet({ currentReview: null });
     generateReview();
+  };
+
+  document.getElementById('reviewCopyText').onclick = async () => {
+    const caption = pickRandom(REVIEW_CAPTIONS);
+    const text = `${caption}\n\n"${r.title}"\n\n${r.content}\n\n— ${r.author} (${r.rating}★)`;
+    try { await navigator.clipboard.writeText(text); } catch {}
+    flashBtn('reviewCopyText', 'Copied!');
+    onReviewUse();
+  };
+
+  document.getElementById('reviewCopyImg').onclick = async () => {
+    const btn = document.getElementById('reviewCopyImg');
+    btn.textContent = 'Rendering...';
+    try {
+      const blob = await renderReviewBlob(r);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      btn.textContent = 'Copied!';
+      setTimeout(() => onReviewUse(), 400);
+    } catch (err) {
+      btn.textContent = 'Failed';
+      console.error(err);
+      setTimeout(() => btn.textContent = 'Copy Image', 1500);
+    }
+  };
+
+  document.getElementById('reviewDownload').onclick = async () => {
+    const btn = document.getElementById('reviewDownload');
+    btn.textContent = 'Rendering...';
+    try {
+      const blob = await renderReviewBlob(r);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `review-${(r.title || 'prayerlock').replace(/[^\w]/g, '-').substring(0, 40)}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      btn.textContent = 'Downloaded!';
+      setTimeout(() => onReviewUse(), 400);
+    } catch (err) {
+      btn.textContent = 'Failed';
+      console.error(err);
+      setTimeout(() => btn.textContent = 'Download', 1500);
+    }
   };
 }
 
@@ -992,6 +1034,174 @@ function wrapText(ctx, text, maxWidth) {
     if (current) lines.push(current);
   });
   return lines;
+}
+
+async function renderReviewBlob(r) {
+  const S = 1080;
+  const canvas = document.createElement('canvas');
+  canvas.width = S;
+  canvas.height = S;
+  const ctx = canvas.getContext('2d');
+
+  // Cream page background
+  ctx.fillStyle = '#F4F1EA';
+  ctx.fillRect(0, 0, S, S);
+
+  // Card geometry
+  const margin = 50;
+  const shadowOffset = 22;
+  const cardX = margin;
+  const cardY = margin;
+  const cardW = S - 2 * margin - shadowOffset;
+  const cardH = cardW;
+  const radius = 40;
+
+  // 1) Offset shadow
+  roundedRectPath(ctx, cardX + shadowOffset, cardY + shadowOffset, cardW, cardH, radius);
+  ctx.fillStyle = '#0A0A0A';
+  ctx.fill();
+
+  // 2) White card background
+  ctx.save();
+  roundedRectPath(ctx, cardX, cardY, cardW, cardH, radius);
+  ctx.clip();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(cardX, cardY, cardW, cardH);
+
+  // 3) Orange accent strip at top
+  const accentH = 8;
+  ctx.fillStyle = '#F26522';
+  ctx.fillRect(cardX, cardY, cardW, accentH);
+
+  // 4) Logo + app name header
+  const logoSize = 100;
+  const lx = cardX + 56;
+  const ly = cardY + 46;
+  const logoRadius = 24;
+  try {
+    const logo = await loadImg(PRAYER_LOGO);
+    ctx.save();
+    roundedRectPath(ctx, lx, ly, logoSize, logoSize, logoRadius);
+    ctx.clip();
+    ctx.drawImage(logo, lx, ly, logoSize, logoSize);
+    ctx.restore();
+    // Black border on logo
+    ctx.strokeStyle = '#0A0A0A';
+    ctx.lineWidth = 4;
+    roundedRectPath(ctx, lx, ly, logoSize, logoSize, logoRadius);
+    ctx.stroke();
+  } catch {}
+
+  ctx.fillStyle = '#0A0A0A';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = '800 30px "Helvetica Neue", -apple-system, sans-serif';
+  ctx.fillText('PRAYER LOCK', lx + logoSize + 24, ly + 44);
+
+  ctx.font = '600 17px "Helvetica Neue", -apple-system, sans-serif';
+  ctx.fillStyle = '#6B6B6B';
+  ctx.fillText('5-STAR APP STORE REVIEW', lx + logoSize + 24, ly + 74);
+
+  // Divider line under header
+  const divY = ly + logoSize + 30;
+  ctx.strokeStyle = '#0A0A0A';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cardX + 56, divY);
+  ctx.lineTo(cardX + cardW - 56, divY);
+  ctx.stroke();
+
+  // 5) Stars
+  const starsY = divY + 48;
+  ctx.font = '400 38px sans-serif';
+  ctx.fillStyle = '#F59E0B';
+  ctx.fillText('★ ★ ★ ★ ★', cardX + 56, starsY);
+
+  // 6) Review title
+  ctx.font = '800 36px "Helvetica Neue", -apple-system, sans-serif';
+  ctx.fillStyle = '#0A0A0A';
+  const titleY = starsY + 48;
+  const maxW = cardW - 112;
+  const titleLines = wrapText(ctx, r.title || '', maxW);
+  let curY = titleY;
+  titleLines.forEach(line => {
+    ctx.fillText(line, cardX + 56, curY);
+    curY += 44;
+  });
+
+  // 7) Review content
+  curY += 10;
+  ctx.font = '400 28px "Playfair Display", "Didot", "Georgia", serif';
+  ctx.fillStyle = '#333333';
+  const contentLines = wrapText(ctx, r.content || '', maxW);
+  // Limit to fit card
+  const maxContentLines = Math.floor((cardY + cardH - curY - 140) / 38);
+  const shownLines = contentLines.slice(0, maxContentLines);
+  const truncated = contentLines.length > maxContentLines;
+  shownLines.forEach(line => {
+    ctx.fillText(line, cardX + 56, curY);
+    curY += 38;
+  });
+  if (truncated) {
+    ctx.fillText('...', cardX + 56, curY);
+    curY += 38;
+  }
+
+  // 8) Author row at bottom
+  const authorY = cardY + cardH - 80;
+
+  // Divider above author
+  ctx.strokeStyle = '#0A0A0A';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(cardX + 56, authorY - 20);
+  ctx.lineTo(cardX + cardW - 56, authorY - 20);
+  ctx.stroke();
+
+  // Author avatar circle
+  const avatarSize = 48;
+  const initial = (r.author || '?').trim()[0]?.toUpperCase() || '?';
+  const avX = cardX + 56 + avatarSize / 2;
+  const avY = authorY + avatarSize / 2 - 6;
+  ctx.beginPath();
+  ctx.arc(avX, avY, avatarSize / 2, 0, Math.PI * 2);
+  ctx.fillStyle = '#FFE8D9';
+  ctx.fill();
+  ctx.strokeStyle = '#0A0A0A';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.fillStyle = '#0A0A0A';
+  ctx.font = '800 22px "Helvetica Neue", sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(initial, avX, avY);
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
+  // Author name
+  ctx.font = '700 24px "Helvetica Neue", -apple-system, sans-serif';
+  ctx.fillStyle = '#0A0A0A';
+  ctx.fillText(r.author || 'Anonymous', cardX + 56 + avatarSize + 16, authorY + 14);
+
+  // Date
+  if (r.date) {
+    const dateStr = new Date(r.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    ctx.font = '600 16px "Helvetica Neue", sans-serif';
+    ctx.fillStyle = '#6B6B6B';
+    ctx.fillText(dateStr.toUpperCase(), cardX + 56 + avatarSize + 16, authorY + 42);
+  }
+
+  ctx.restore();
+
+  // 9) Black card border
+  ctx.strokeStyle = '#0A0A0A';
+  ctx.lineWidth = 8;
+  roundedRectPath(ctx, cardX, cardY, cardW, cardH, radius);
+  ctx.stroke();
+
+  return await new Promise((resolve, reject) => {
+    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('toBlob returned null')), 'image/png');
+  });
 }
 
 function roundedRectPath(ctx, x, y, w, h, r) {
